@@ -20,6 +20,7 @@
 #include <linux/completion.h>
 #include <linux/list.h>
 #include <linux/of.h>
+#include <linux/of_platform.h>
 #include <linux/platform_device.h>
 #include <linux/compat.h>
 #include <linux/dma-mapping.h>
@@ -75,6 +76,7 @@ static struct vchiq_device *vcsm_cma;
 
 struct vchiq_drvdata {
 	const unsigned int cache_line_size;
+	const bool use_36bit_addrs;
 	struct rpi_firmware *fw;
 };
 
@@ -120,6 +122,11 @@ struct vchiq_arm_state {
 	int first_connect;
 };
 
+static struct vchiq_drvdata bcm2711_drvdata = {
+	.cache_line_size = 64,
+	.use_36bit_addrs = true,
+};
+
 struct vchiq_2835_state {
 	int inited;
 	struct vchiq_arm_state arm_state;
@@ -149,10 +156,12 @@ static void __iomem *g_regs;
  * of 32.
  */
 static unsigned int g_cache_line_size = 32;
+static unsigned int g_use_36bit_addrs = 0;
 static unsigned int g_fragments_size;
 static char *g_fragments_base;
 static char *g_free_fragments;
 static struct semaphore g_free_fragments_sema;
+static struct device *g_dma_dev;
 
 static DEFINE_SEMAPHORE(g_free_fragments_mutex, 1);
 
@@ -182,7 +191,7 @@ static void
 cleanup_pagelistinfo(struct vchiq_instance *instance, struct vchiq_pagelist_info *pagelistinfo)
 {
 	if (pagelistinfo->scatterlist_mapped) {
-		dma_unmap_sg(instance->state->dev, pagelistinfo->scatterlist,
+		dma_unmap_sg(g_dma_dev, pagelistinfo->scatterlist,
 			     pagelistinfo->num_pages, pagelistinfo->dma_dir);
 	}
 
@@ -341,7 +350,7 @@ create_pagelist(struct vchiq_instance *instance, char *buf, char __user *ubuf,
 		count -= len;
 	}
 
-	dma_buffers = dma_map_sg(instance->state->dev,
+	dma_buffers = dma_map_sg(g_dma_dev,
 				 scatterlist,
 				 num_pages,
 				 pagelistinfo->dma_dir);
@@ -355,22 +364,61 @@ create_pagelist(struct vchiq_instance *instance, char *buf, char __user *ubuf,
 
 	/* Combine adjacent blocks for performance */
 	k = 0;
-	for_each_sg(scatterlist, sg, dma_buffers, i) {
-		u32 len = sg_dma_len(sg);
-		u32 addr = sg_dma_address(sg);
+	if (g_use_36bit_addrs) {
+		for_each_sg(scatterlist, sg, dma_buffers, i) {
+			u32 len = sg_dma_len(sg);
+			u64 addr = sg_dma_address(sg);
+			u32 page_id = (u32)((addr >> 4) & ~0xff);
+			u32 sg_pages = (len + PAGE_SIZE - 1) >> PAGE_SHIFT;
 
-		/* Note: addrs is the address + page_count - 1
-		 * The firmware expects blocks after the first to be page-
-		 * aligned and a multiple of the page size
-		 */
-		WARN_ON(len == 0);
-		WARN_ON(i && (i != (dma_buffers - 1)) && (len & ~PAGE_MASK));
-		WARN_ON(i && (addr & ~PAGE_MASK));
-		if (is_adjacent_block(addrs, addr, k))
-			addrs[k - 1] += ((len + PAGE_SIZE - 1) >> PAGE_SHIFT);
-		else
-			addrs[k++] = (addr & PAGE_MASK) |
-				(((len + PAGE_SIZE - 1) >> PAGE_SHIFT) - 1);
+			/* Note: addrs is the address + page_count - 1
+			 * The firmware expects blocks after the first to be page-
+			 * aligned and a multiple of the page size
+			 */
+			WARN_ON(len == 0);
+			WARN_ON(i &&
+				(i != (dma_buffers - 1)) && (len & ~PAGE_MASK));
+			WARN_ON(i && (addr & ~PAGE_MASK));
+			WARN_ON(upper_32_bits(addr) > 0xf);
+
+			if (k > 0 &&
+			    ((addrs[k - 1] & ~0xff) +
+			     (((addrs[k - 1] & 0xff) + 1) << 8)
+			     == page_id)) {
+				u32 inc_pages = min(sg_pages,
+						    0xff - (addrs[k - 1] & 0xff));
+				addrs[k - 1] += inc_pages;
+				page_id += inc_pages << 8;
+				sg_pages -= inc_pages;
+			}
+			while (sg_pages) {
+				u32 inc_pages = min(sg_pages, 0x100u);
+				addrs[k++] = page_id | (inc_pages - 1);
+				page_id += inc_pages << 8;
+				sg_pages -= inc_pages;
+			}
+		}
+	} else {
+		for_each_sg(scatterlist, sg, dma_buffers, i) {
+			u32 len = sg_dma_len(sg);
+			u32 addr = sg_dma_address(sg);
+			u32 new_pages = (len + PAGE_SIZE - 1) >> PAGE_SHIFT;
+
+			/* Note: addrs is the address + page_count - 1
+			 * The firmware expects blocks after the first to be page-
+			 * aligned and a multiple of the page size
+			 */
+			WARN_ON(len == 0);
+			WARN_ON(i && (i != (dma_buffers - 1)) && (len & ~PAGE_MASK));
+			WARN_ON(i && (addr & ~PAGE_MASK));
+			if (k > 0 &&
+			    ((addrs[k - 1] & PAGE_MASK) +
+			     (((addrs[k - 1] & ~PAGE_MASK) + 1) << PAGE_SHIFT))
+			    == (addr & PAGE_MASK))
+				addrs[k - 1] += new_pages;
+			else
+				addrs[k++] = (addr & PAGE_MASK) | (new_pages - 1);
+		}
 	}
 
 	/* Partial cache lines (fragments) require special measures */
@@ -413,7 +461,7 @@ free_pagelist(struct vchiq_instance *instance, struct vchiq_pagelist_info *pagel
 	 * NOTE: dma_unmap_sg must be called before the
 	 * cpu can touch any of the data/pages.
 	 */
-	dma_unmap_sg(instance->state->dev, pagelistinfo->scatterlist,
+	dma_unmap_sg(g_dma_dev, pagelistinfo->scatterlist,
 		     pagelistinfo->num_pages, pagelistinfo->dma_dir);
 	pagelistinfo->scatterlist_mapped = 0;
 
@@ -468,6 +516,7 @@ free_pagelist(struct vchiq_instance *instance, struct vchiq_pagelist_info *pagel
 static int vchiq_platform_init(struct platform_device *pdev, struct vchiq_state *state)
 {
 	struct device *dev = &pdev->dev;
+	struct device *dma_dev = NULL;
 	struct vchiq_drvdata *drvdata = platform_get_drvdata(pdev);
 	struct rpi_firmware *fw = drvdata->fw;
 	struct vchiq_slot_zero *vchiq_slot_zero;
@@ -489,6 +538,24 @@ static int vchiq_platform_init(struct platform_device *pdev, struct vchiq_state 
 	g_cache_line_size = drvdata->cache_line_size;
 	g_fragments_size = 2 * g_cache_line_size;
 
+	if (drvdata->use_36bit_addrs) {
+		struct device_node *dma_node =
+			of_find_compatible_node(NULL, NULL, "brcm,bcm2711-dma");
+
+		if (dma_node) {
+			struct platform_device *pdev;
+
+			pdev = of_find_device_by_node(dma_node);
+			if (pdev)
+				dma_dev = &pdev->dev;
+			of_node_put(dma_node);
+			g_use_36bit_addrs = true;
+		} else {
+			dev_err(dev, "40-bit DMA controller not found\n");
+			return -EINVAL;
+		}
+	}
+
 	/* Allocate space for the channels in coherent memory */
 	slot_mem_size = PAGE_ALIGN(TOTAL_SLOTS * VCHIQ_SLOT_SIZE);
 	frag_mem_size = PAGE_ALIGN(g_fragments_size * MAX_FRAGMENTS);
@@ -501,13 +568,14 @@ static int vchiq_platform_init(struct platform_device *pdev, struct vchiq_state 
 	}
 
 	WARN_ON(((unsigned long)slot_mem & (PAGE_SIZE - 1)) != 0);
+	channelbase = slot_phys;
 
 	vchiq_slot_zero = vchiq_init_slots(dev, slot_mem, slot_mem_size);
 	if (!vchiq_slot_zero)
 		return -ENOMEM;
 
 	vchiq_slot_zero->platform_data[VCHIQ_PLATFORM_FRAGMENTS_OFFSET_IDX] =
-		(int)slot_phys + slot_mem_size;
+		channelbase + slot_mem_size;
 	vchiq_slot_zero->platform_data[VCHIQ_PLATFORM_FRAGMENTS_COUNT_IDX] =
 		MAX_FRAGMENTS;
 
@@ -541,7 +609,6 @@ static int vchiq_platform_init(struct platform_device *pdev, struct vchiq_state 
 	}
 
 	/* Send the base address of the slots to VideoCore */
-	channelbase = slot_phys;
 	err = rpi_firmware_property(fw, RPI_FIRMWARE_VCHIQ_INIT,
 				    &channelbase, sizeof(channelbase));
 	if (err) {
@@ -557,6 +624,7 @@ static int vchiq_platform_init(struct platform_device *pdev, struct vchiq_state 
 
 	dev_dbg(&pdev->dev, "arm: vchiq_init - done (slots %pK, phys %pad)\n",
 		vchiq_slot_zero, &slot_phys);
+	g_dma_dev = dma_dev ?: dev;
 
 	vchiq_call_connected_callbacks();
 
@@ -1710,6 +1778,7 @@ void vchiq_platform_conn_state_changed(struct vchiq_state *state,
 static const struct of_device_id vchiq_of_match[] = {
 	{ .compatible = "brcm,bcm2835-vchiq", .data = &bcm2835_drvdata },
 	{ .compatible = "brcm,bcm2836-vchiq", .data = &bcm2836_drvdata },
+	{ .compatible = "brcm,bcm2711-vchiq", .data = &bcm2711_drvdata },
 	{},
 };
 MODULE_DEVICE_TABLE(of, vchiq_of_match);
