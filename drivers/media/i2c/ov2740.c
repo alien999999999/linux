@@ -1147,7 +1147,7 @@ static int ov2740_check_hwcfg(struct device *dev)
 				     mclk);
 	}
 
-	ret = v4l2_fwnode_endpoint_alloc_parse(ep, &bus_cfg);
+	ret = v4l2_fwnode_endpoint_alloc_parse(dev, ep, &bus_cfg);
 	fwnode_handle_put(ep);
 	if (ret)
 		return dev_err_probe(dev, ret, "parsing endpoint failed\n");

@@ -493,7 +493,7 @@ static int __v4l2_fwnode_endpoint_parse(struct fwnode_handle *fwnode,
 	return 0;
 }
 
-int v4l2_fwnode_endpoint_parse(struct fwnode_handle *fwnode,
+int v4l2_fwnode_endpoint_parse(struct device *dev, struct fwnode_handle *fwnode,
 			       struct v4l2_fwnode_endpoint *vep)
 {
 	int ret;
@@ -516,7 +516,8 @@ void v4l2_fwnode_endpoint_free(struct v4l2_fwnode_endpoint *vep)
 }
 EXPORT_SYMBOL_GPL(v4l2_fwnode_endpoint_free);
 
-int v4l2_fwnode_endpoint_alloc_parse(struct fwnode_handle *fwnode,
+int v4l2_fwnode_endpoint_alloc_parse(struct device *dev,
+				     struct fwnode_handle *fwnode,
 				     struct v4l2_fwnode_endpoint *vep)
 {
 	int rval;
