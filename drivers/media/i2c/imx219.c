@@ -380,7 +380,9 @@ static int imx219_set_ctrl(struct v4l2_ctrl *ctrl)
 	int ret = 0;
 
 	state = v4l2_subdev_get_locked_active_state(&imx219->sd);
-	format = v4l2_subdev_state_get_format(state, IMX219_PAD_SOURCE);
+	format = v4l2_subdev_state_get_opposite_stream_format(state,
+							      IMX219_PAD_IMAGE,
+							      0);
 
 	if (ctrl->id == V4L2_CID_VBLANK) {
 		int exposure_max, exposure_def;
@@ -599,8 +601,9 @@ static int imx219_set_framefmt(struct imx219 *imx219,
 	u64 bin_h, bin_v;
 	int ret = 0;
 
-	format = v4l2_subdev_state_get_format(state, IMX219_PAD_SOURCE);
-	crop = v4l2_subdev_state_get_crop(state, IMX219_PAD_IMAGE);
+	format = v4l2_subdev_state_get_format(state, IMX219_PAD_SOURCE,
+						     0);
+	crop = v4l2_subdev_state_get_crop(state, IMX219_PAD_IMAGE, 0);
 
 	switch (format->code) {
 	case MEDIA_BUS_FMT_SRGGB8_1X8:
@@ -839,7 +842,7 @@ static int imx219_set_pad_format(struct v4l2_subdev *sd,
 	/* Propagate the format through the sensor. */
 
 	/* The image pad models the pixel array, and thus has a fixed size. */
-	format = v4l2_subdev_state_get_format(state, IMX219_PAD_IMAGE);
+	format = v4l2_subdev_state_get_format(state, IMX219_PAD_IMAGE, 0);
 	*format = fmt->format;
 	format->width = IMX219_NATIVE_WIDTH;
 	format->height = IMX219_NATIVE_HEIGHT;
@@ -851,9 +854,9 @@ static int imx219_set_pad_format(struct v4l2_subdev *sd,
 	bin_h = min(IMX219_PIXEL_ARRAY_WIDTH / fmt->format.width, 2U);
 	bin_v = min(IMX219_PIXEL_ARRAY_HEIGHT / fmt->format.height, 2U);
 
-	crop = v4l2_subdev_state_get_crop(state, IMX219_PAD_IMAGE);
-	crop->width = format->width * bin_h;
-	crop->height = format->height * bin_v;
+	crop = v4l2_subdev_state_get_crop(state, IMX219_PAD_IMAGE, 0);
+	crop->width = fmt->format.width * bin_h;
+	crop->height = fmt->format.height * bin_v;
 	crop->left = (IMX219_NATIVE_WIDTH - crop->width) / 2;
 	crop->top = (IMX219_NATIVE_HEIGHT - crop->height) / 2;
 
@@ -861,7 +864,7 @@ static int imx219_set_pad_format(struct v4l2_subdev *sd,
 	 * The compose rectangle models binning, its size is the sensor output
 	 * size.
 	 */
-	compose = v4l2_subdev_state_get_compose(state, IMX219_PAD_IMAGE);
+	compose = v4l2_subdev_state_get_compose(state, IMX219_PAD_IMAGE, 0);
 	compose->left = 0;
 	compose->top = 0;
 	compose->width = fmt->format.width;
@@ -871,13 +874,13 @@ static int imx219_set_pad_format(struct v4l2_subdev *sd,
 	 * No mode use digital crop, the source pad crop rectangle size and
 	 * format are thus identical to the image pad compose rectangle.
 	 */
-	crop = v4l2_subdev_state_get_crop(state, IMX219_PAD_SOURCE);
+	crop = v4l2_subdev_state_get_crop(state, IMX219_PAD_SOURCE, 0);
 	crop->left = 0;
 	crop->top = 0;
 	crop->width = fmt->format.width;
 	crop->height = fmt->format.height;
 
-	format = v4l2_subdev_state_get_format(state, IMX219_PAD_SOURCE);
+	format = v4l2_subdev_state_get_format(state, IMX219_PAD_SOURCE, 0);
 	*format = fmt->format;
 
 	if (fmt->which == V4L2_SUBDEV_FORMAT_ACTIVE) {
@@ -941,7 +944,9 @@ static int imx219_get_selection(struct v4l2_subdev *sd,
 			return 0;
 
 		case IMX219_PAD_SOURCE:
-			compose = v4l2_subdev_state_get_compose(state, IMX219_PAD_IMAGE);
+			compose = v4l2_subdev_state_get_compose(state,
+								       IMX219_PAD_IMAGE,
+								       0);
 			sel->r.top = 0;
 			sel->r.left = 0;
 			sel->r.width = compose->width;
@@ -952,14 +957,14 @@ static int imx219_get_selection(struct v4l2_subdev *sd,
 		break;
 
 	case V4L2_SEL_TGT_CROP:
-		sel->r = *v4l2_subdev_state_get_crop(state, sel->pad);
+		sel->r = *v4l2_subdev_state_get_crop(state, sel->pad, 0);
 		return 0;
 
 	case V4L2_SEL_TGT_COMPOSE:
 		if (sel->pad != IMX219_PAD_IMAGE)
 			return -EINVAL;
 
-		sel->r = *v4l2_subdev_state_get_compose(state, sel->pad);
+		sel->r = *v4l2_subdev_state_get_compose(state, sel->pad, 0);
 		return 0;
 	}
 
@@ -969,15 +974,34 @@ static int imx219_get_selection(struct v4l2_subdev *sd,
 static int imx219_init_state(struct v4l2_subdev *sd,
 			     struct v4l2_subdev_state *state)
 {
+	struct v4l2_subdev_route routes[1] = {
+		{
+			.sink_pad = IMX219_PAD_IMAGE,
+			.sink_stream = 0,
+			.source_pad = IMX219_PAD_SOURCE,
+			.source_stream = 0,
+			.flags = V4L2_SUBDEV_ROUTE_FL_ACTIVE,
+		},
+	};
+	struct v4l2_subdev_krouting routing = {
+		.num_routes = ARRAY_SIZE(routes),
+		.routes = routes,
+	};
 	struct v4l2_subdev_format fmt = {
 		.which = V4L2_SUBDEV_FORMAT_TRY,
 		.pad = IMX219_PAD_SOURCE,
+		.stream = 0,
 		.format = {
 			.code = MEDIA_BUS_FMT_SRGGB10_1X10,
 			.width = supported_modes[0].width,
 			.height = supported_modes[0].height,
 		},
 	};
+	int ret;
+
+	ret = v4l2_subdev_set_routing(sd, state, &routing);
+	if (ret)
+		return ret;
 
 	imx219_set_pad_format(sd, state, &fmt);
 
@@ -1236,7 +1260,8 @@ static int imx219_probe(struct i2c_client *client)
 
 	/* Initialize subdev */
 	imx219->sd.flags |= V4L2_SUBDEV_FL_HAS_DEVNODE |
-			    V4L2_SUBDEV_FL_HAS_EVENTS;
+			    V4L2_SUBDEV_FL_HAS_EVENTS |
+			    V4L2_SUBDEV_FL_STREAMS;
 	imx219->sd.entity.function = MEDIA_ENT_F_CAM_SENSOR;
 
 	/*
