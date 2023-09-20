@@ -146,3 +146,32 @@ the purpose of an example. The following drivers are known to be good examples:
       - ``drivers/media/i2c/imx319.c``
       - Register list based
       - Power management (ACPI and DT)
+Sensor drivers that have any vertical or horizontal flips embedded in the
+register programming sequences shall initialize the V4L2_CID_HFLIP and
+V4L2_CID_VFLIP controls with the values programmed by the register sequences.
+The default values of these controls shall be 0 (disabled). Especially these
+controls shall not be inverted, independently of the sensor's mounting
+rotation.
+
+Embedded data
+-------------
+
+Many sensors, mostly raw sensors, support embedded data which is used to convey
+the sensor configuration for the captured frame back to the host. While CSI-2 is
+the most common bus used by such sensors, embedded data is not entirely limited
+to CSI-2 bus due to e.g. bridge devices.
+
+Embedded data support should use an internal source pad and route to the
+external pad. If embedded data output can be disabled in hardware, it should be
+possible to disable the embedded data route via ``VIDIOC_SUBDEV_S_ROUTING``
+IOCTL.
+
+CCS and non-CCS embedded data
+~~~~~~~~~~~~~~~~~~~~~~~~~~~~~
+
+Embedded data which is compliant with CCS definitions shall use ``CCS embedded
+data format <MEDIA-BUS-FMT-CCS-EMBEDDED>``. Device specific embedded data which
+is compliant up to MIPI CCS embedded data levels 1 or 2 only shall refer to CCS
+embedded data formats and document the level of conformance. The rest of the
+device specific embedded data format shall be documented in the context of the
+data format itself.
