@@ -970,7 +970,7 @@ do_vidioc_subdev_g_routing:
 
 		memcpy((struct v4l2_subdev_route *)(uintptr_t)routing->routes,
 		       krouting->routes,
-		       min(krouting->num_routes, krouting->len_routes) *
+		       min(krouting->num_routes, routing->len_routes) *
 		       sizeof(*krouting->routes));
 		routing->num_routes = krouting->num_routes;
 
