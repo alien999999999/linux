@@ -1761,7 +1761,8 @@ static inline void v4l2_subdev_lock_state(struct v4l2_subdev_state *state)
  */
 static inline void v4l2_subdev_unlock_state(struct v4l2_subdev_state *state)
 {
-	mutex_unlock(state->lock);
+	if (state)
+		mutex_unlock(state->lock);
 }
 
 /**
@@ -1821,6 +1822,28 @@ v4l2_subdev_lock_and_get_active_state(struct v4l2_subdev *sd)
 	if (sd->active_state)
 		v4l2_subdev_lock_state(sd->active_state);
 	return sd->active_state;
+}
+
+/**
+ * v4l2_subdev_lock_active_state_if_try_state() - Locks and returns the active
+ *						  subdev state if the given
+ *						  state is a try state
+ * @sd: The subdevice
+ * @state: The potential try state
+ *
+ * Returns the locked active state for the subdevice if the @state is a try
+ * state.
+ *
+ * The state must be unlocked with v4l2_subdev_unlock_state() after use.
+ */
+static inline struct v4l2_subdev_state *
+v4l2_subdev_lock_active_state_if_try_state(struct v4l2_subdev *sd,
+					   struct v4l2_subdev_state *state)
+{
+	if (sd->active_state == state)
+		return NULL;
+
+	return v4l2_subdev_lock_and_get_active_state(sd);
 }
 
 /**
